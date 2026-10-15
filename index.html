@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>바이브코딩 캐처</title>
+    <!-- Tailwind CSS for UI styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- MediaPipe dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #1a202c; /* Tailwind gray-900 */
+            color: white;
+            font-family: 'Inter', sans-serif;
+        }
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 10;
+        }
+        video {
+            display: none; /* Hidden, only used for processing */
+        }
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 20;
+            backdrop-filter: blur(5px);
+        }
+        .hidden {
+            display: none !important;
+        }
+        #score-board {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 30;
+            font-size: 2rem;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+            background: rgba(255, 255, 255, 0.2);
+            padding: 10px 20px;
+            border-radius: 12px;
+            border: 2px solid rgba(255, 255, 255, 0.5);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <video id="input-video" autoplay playsinline></video>
+        <canvas id="game-canvas"></canvas>
+
+        <div id="score-board">점수: <span id="score">0</span> / 200</div>
+
+        <!-- Start Screen -->
+        <div id="start-screen" class="overlay">
+            <h1 class="text-6xl font-extrabold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-orange-400 to-red-500 text-center">낙엽 캐처</h1>
+            <p class="text-xl mb-8 text-gray-300 text-center max-w-md">
+                하늘에서 떨어지는 알록달록한 낙엽을 손으로 터치하세요!<br>
+                웹캠이 필요합니다. 200점을 달성하면 승리합니다.
+            </p>
+            <button id="start-btn" class="px-8 py-4 bg-gradient-to-r from-orange-500 to-red-600 hover:from-orange-600 hover:to-red-700 text-white rounded-full font-bold text-2xl shadow-lg transform transition hover:scale-105">
+                게임 시작
+            </button>
+        </div>
+
+        <!-- Loading Screen -->
+        <div id="loading-screen" class="overlay hidden">
+            <h2 class="text-3xl font-bold mb-4 animate-pulse">카메라 및 AI 모델 로딩 중...</h2>
+            <p class="text-gray-400">카메라 권한을 허용해 주세요.</p>
+        </div>
+
+        <!-- Game Over Screen -->
+        <div id="game-over-screen" class="overlay hidden">
+            <h1 class="text-7xl font-extrabold mb-4 text-green-400 drop-shadow-lg">Clear!</h1>
+            <p class="text-2xl mb-8 text-white">200점 달성 축하합니다!</p>
+            <button id="restart-btn" class="px-8 py-4 bg-green-500 hover:bg-green-600 text-white rounded-full font-bold text-2xl shadow-lg transform transition hover:scale-105">
+                다시 하기
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('input-video');
+        const canvasElement = document.getElementById('game-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        
+        const scoreElement = document.getElementById('score');
+        const startScreen = document.getElementById('start-screen');
+        const loadingScreen = document.getElementById('loading-screen');
+        const gameOverScreen = document.getElementById('game-over-screen');
+        const startBtn = document.getElementById('start-btn');
+        const restartBtn = document.getElementById('restart-btn');
+
+        let score = 0;
+        const WIN_SCORE = 200;
+        let isPlaying = false;
+        let camera = null;
+        let hands = null;
+        let latestLandmarks = [];
+
+        // Game Entities
+        let leaves = [];
+        let particles = [];
+        let frameCount = 0;
+        
+        // Colors for explosion particles to match autumn theme
+        const autumnColors = ['#e63946', '#f4a261', '#e9c46a', '#e76f51', '#d90429', '#ffb703'];
+
+        class Leaf {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.speed = Math.random() * 2 + 2; // Falling speed
+                this.swayOffset = Math.random() * Math.PI * 2;
+                this.swaySpeed = Math.random() * 0.05 + 0.02;
+                this.swayAmount = Math.random() * 2 + 1;
+                this.angle = Math.random() * Math.PI * 2;
+                this.rotSpeed = (Math.random() - 0.5) * 0.05;
+                
+                const emojis = ['🍁', '🍂'];
+                this.emoji = emojis[Math.floor(Math.random() * emojis.length)];
+                
+                this.size = Math.random() * 20 + 40; // Size between 40 and 60
+                this.radius = this.size / 2.5; // Collision radius
+                this.color = autumnColors[Math.floor(Math.random() * autumnColors.length)];
+                this.active = true;
+            }
+
+            draw(ctx) {
+                if (!this.active) return;
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                ctx.font = `${this.size}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                // Add a soft glow
+                ctx.shadowColor = 'rgba(255, 255, 255, 0.3)';
+                ctx.shadowBlur = 10;
+                ctx.fillText(this.emoji, 0, 0);
+                ctx.restore();
+            }
+
+            update() {
+                this.y += this.speed;
+                // Add natural swaying motion
+                this.x += Math.sin(frameCount * this.swaySpeed + this.swayOffset) * this.swayAmount;
+                // Add rotation
+                this.angle += this.rotSpeed;
+                
+                // Deactivate if it falls off screen
+                if (this.y > canvasElement.height + 50) {
+                    this.active = false;
+                }
+            }
+        }
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 10;
+                this.vy = (Math.random() - 0.5) * 10;
+                this.life = 1.0;
+                this.color = color;
+            }
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life -= 0.05;
+            }
+            draw(ctx) {
+                if (this.life <= 0) return;
+                ctx.save();
+                ctx.globalAlpha = this.life;
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        function spawnLeaf() {
+            if (!isPlaying) return;
+            const x = Math.random() * (canvasElement.width - 200) + 100;
+            leaves.push(new Leaf(x, -50));
+        }
+
+        function createExplosion(x, y, color) {
+            for (let i = 0; i < 15; i++) {
+                particles.push(new Particle(x, y, color));
+            }
+        }
+
+        function updateGame() {
+            if (!isPlaying) return;
+
+            frameCount++;
+            
+            // Resize canvas to match screen
+            if (canvasElement.width !== window.innerWidth || canvasElement.height !== window.innerHeight) {
+                canvasElement.width = window.innerWidth;
+                canvasElement.height = window.innerHeight;
+            }
+
+            // Clear and draw mirrored camera feed as background
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+                canvasCtx.scale(-1, 1);
+                canvasCtx.drawImage(videoElement, -canvasElement.width, 0, canvasElement.width, canvasElement.height);
+            }
+            canvasCtx.restore();
+
+            // Spawn leaves
+            if (frameCount % 45 === 0) { // roughly every 0.75 seconds at 60fps
+                spawnLeaf();
+            }
+
+            // Check collisions using latest landmarks
+            let activeFingertips = [];
+            
+            if (latestLandmarks.length > 0) {
+                latestLandmarks.forEach(handLandmarks => {
+                    // Extract index finger tip (landmark 8) and middle finger tip (landmark 12)
+                    // We flip the X coordinate to match the mirrored camera rendering
+                    const indexTip = {
+                        x: (1 - handLandmarks[8].x) * canvasElement.width,
+                        y: handLandmarks[8].y * canvasElement.height
+                    };
+                    const middleTip = {
+                        x: (1 - handLandmarks[12].x) * canvasElement.width,
+                        y: handLandmarks[12].y * canvasElement.height
+                    };
+                    activeFingertips.push(indexTip, middleTip);
+
+                    // Draw fingertips for visual feedback
+                    canvasCtx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(indexTip.x, indexTip.y, 10, 0, 2 * Math.PI);
+                    canvasCtx.fill();
+                    
+                    canvasCtx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(middleTip.x, middleTip.y, 10, 0, 2 * Math.PI);
+                    canvasCtx.fill();
+                });
+            }
+
+            // Update and draw leaves
+            leaves = leaves.filter(leaf => leaf.active);
+            leaves.forEach(leaf => {
+                leaf.update();
+                leaf.draw(canvasCtx);
+
+                // Collision Check
+                activeFingertips.forEach(tip => {
+                    if (!leaf.active) return;
+                    const dx = tip.x - leaf.x;
+                    const dy = tip.y - leaf.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+
+                    if (distance < leaf.radius + 15) { // Collision radius + fingertip radius
+                        leaf.active = false;
+                        score += 10;
+                        scoreElement.innerText = score;
+                        createExplosion(leaf.x, leaf.y, leaf.color);
+
+                        if (score >= WIN_SCORE) {
+                            triggerWin();
+                        }
+                    }
+                });
+            });
+
+            // Update and draw particles
+            particles = particles.filter(p => p.life > 0);
+            particles.forEach(p => {
+                p.update();
+                p.draw(canvasCtx);
+            });
+
+            if (isPlaying) {
+                requestAnimationFrame(updateGame);
+            }
+        }
+
+        function triggerWin() {
+            isPlaying = false;
+            gameOverScreen.classList.remove('hidden');
+            leaves = [];
+        }
+
+        function startGameLoop() {
+            score = 0;
+            scoreElement.innerText = score;
+            leaves = [];
+            particles = [];
+            isPlaying = true;
+            loadingScreen.classList.add('hidden');
+            startScreen.classList.add('hidden');
+            gameOverScreen.classList.add('hidden');
+            frameCount = 0;
+            requestAnimationFrame(updateGame);
+        }
+
+        function onResults(results) {
+            if (results.multiHandLandmarks) {
+                latestLandmarks = results.multiHandLandmarks;
+            } else {
+                latestLandmarks = [];
+            }
+        }
+
+        async function initGame() {
+            startScreen.classList.add('hidden');
+            loadingScreen.classList.remove('hidden');
+
+            try {
+                // Initialize MediaPipe Hands
+                hands = new Hands({locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                }});
+                
+                hands.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.6,
+                    minTrackingConfidence: 0.6
+                });
+                
+                hands.onResults(onResults);
+
+                // Setup Camera
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await hands.send({image: videoElement});
+                    },
+                    width: 640,
+                    height: 480
+                });
+
+                await camera.start();
+                
+                // Once camera starts, begin game loop
+                startGameLoop();
+
+            } catch (error) {
+                console.error("Camera or MediaPipe initialization failed:", error);
+                alert("카메라를 로드할 수 없습니다. 카메라 권한을 확인해주세요.");
+                loadingScreen.classList.add('hidden');
+                startScreen.classList.remove('hidden');
+            }
+        }
+
+        // Event Listeners
+        startBtn.addEventListener('click', () => {
+            initGame();
+        });
+
+        restartBtn.addEventListener('click', () => {
+            startGameLoop();
+        });
+
+        // Handle initial canvas resize
+        window.addEventListener('resize', () => {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+        });
+
+    </script>
+</body>
+</html>
